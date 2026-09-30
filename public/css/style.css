@@ -1,0 +1,229 @@
+/* ==========================================================================
+   MIDAS BANK - DESIGN SYSTEM & LUXURY FINTECH THEME ("TOQUE DE MIDAS")
+   ========================================================================== */
+
+:root {
+  --midas-gold: #e5b948;
+  --midas-gold-glow: rgba(229, 185, 72, 0.35);
+  --midas-gold-dark: #b8860b;
+  --midas-bg-dark: #0a0e17;
+  --midas-card-bg: #111827;
+  --midas-card-border: #1f293d;
+  --midas-accent-blue: #3b82f6;
+  --midas-emerald: #10b981;
+  --midas-rose: #f43f5e;
+  --midas-text-muted: #94a3b8;
+}
+
+body {
+  background-color: var(--midas-bg-dark);
+  color: #f1f5f9;
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  min-height: 100vh;
+  background-image: 
+    radial-gradient(circle at 10% 15%, rgba(229, 185, 72, 0.05) 0%, transparent 40%),
+    radial-gradient(circle at 90% 85%, rgba(59, 130, 246, 0.05) 0%, transparent 40%);
+  background-attachment: fixed;
+}
+
+/* NAVBAR */
+.navbar-midas {
+  background: rgba(17, 24, 39, 0.85);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--midas-card-border);
+}
+
+.brand-gold {
+  color: var(--midas-gold) !important;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-shadow: 0 0 16px var(--midas-gold-glow);
+}
+
+/* CARDS */
+.card-midas {
+  background: rgba(17, 24, 39, 0.9);
+  border: 1px solid var(--midas-card-border);
+  border-radius: 14px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+  transition: all 0.25s ease;
+}
+
+.card-midas:hover {
+  border-color: rgba(229, 185, 72, 0.3);
+}
+
+.card-midas-featured {
+  border: 1px solid rgba(229, 185, 72, 0.4);
+  background: linear-gradient(145deg, rgba(26, 32, 48, 0.95), rgba(17, 24, 39, 0.95));
+  box-shadow: 0 10px 35px rgba(229, 185, 72, 0.08);
+}
+
+/* BOTÕES DOURADOS */
+.btn-midas-gold {
+  background: linear-gradient(135deg, #f3cf65 0%, #b8860b 100%);
+  color: #0a0e17;
+  font-weight: 700;
+  border: none;
+  border-radius: 8px;
+  padding: 10px 22px;
+  box-shadow: 0 4px 15px rgba(229, 185, 72, 0.3);
+  transition: all 0.25s ease;
+}
+
+.btn-midas-gold:hover {
+  background: linear-gradient(135deg, #fbe089 0%, #cb940e 100%);
+  color: #000;
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(229, 185, 72, 0.5);
+}
+
+.btn-midas-gold:disabled {
+  background: #374151;
+  color: #9ca3af;
+  box-shadow: none;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.btn-midas-outline {
+  border: 1px solid var(--midas-gold);
+  color: var(--midas-gold);
+  background: transparent;
+  font-weight: 600;
+  border-radius: 8px;
+  transition: all 0.2s ease;
+}
+
+.btn-midas-outline:hover {
+  background: rgba(229, 185, 72, 0.15);
+  color: #fff;
+}
+
+/* BADGES & HIGHLIGHTS */
+.badge-gold {
+  background-color: rgba(229, 185, 72, 0.15);
+  color: var(--midas-gold);
+  border: 1px solid rgba(229, 185, 72, 0.3);
+}
+
+.badge-emerald {
+  background-color: rgba(16, 185, 129, 0.15);
+  color: var(--midas-emerald);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.badge-rose {
+  background-color: rgba(244, 63, 94, 0.15);
+  color: var(--midas-rose);
+  border: 1px solid rgba(244, 63, 94, 0.3);
+}
+
+/* FINGERPRINT PULSE ANIMATION */
+.fingerprint-icon-wrapper {
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(229, 185, 72, 0.1);
+  border: 2px solid rgba(229, 185, 72, 0.3);
+  margin: 0 auto;
+  position: relative;
+}
+
+.fingerprint-icon-wrapper.active {
+  animation: pulse-ring 2s infinite cubic-bezier(0.215, 0.61, 0.355, 1);
+}
+
+@keyframes pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 rgba(229, 185, 72, 0.5);
+  }
+  70% {
+    box-shadow: 0 0 0 20px rgba(229, 185, 72, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(229, 185, 72, 0);
+  }
+}
+
+/* LGPD NOTICE BOX */
+.lgpd-box {
+  background: rgba(30, 41, 59, 0.6);
+  border-left: 4px solid var(--midas-gold);
+  border-radius: 8px;
+  padding: 16px;
+  font-size: 0.92rem;
+  line-height: 1.6;
+  color: #cbd5e1;
+}
+
+/* MODAL DE BIOMETRIA */
+.modal-content-midas {
+  background: #111827;
+  border: 1px solid rgba(229, 185, 72, 0.3);
+  border-radius: 16px;
+  color: #f1f5f9;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.8);
+}
+
+.modal-header-midas {
+  border-bottom: 1px solid var(--midas-card-border);
+}
+
+.modal-footer-midas {
+  border-top: 1px solid var(--midas-card-border);
+}
+
+/* NAV TABS */
+.nav-pills-midas .nav-link {
+  color: #94a3b8;
+  border-radius: 8px;
+  padding: 10px 18px;
+  font-weight: 600;
+  transition: all 0.2s;
+}
+
+.nav-pills-midas .nav-link.active {
+  background: rgba(229, 185, 72, 0.15);
+  color: var(--midas-gold);
+  border: 1px solid rgba(229, 185, 72, 0.4);
+}
+
+.nav-pills-midas .nav-link:hover:not(.active) {
+  color: #f1f5f9;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+/* CODIGO PREVIEW */
+pre.code-preview {
+  background: #090d16;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  padding: 12px;
+  color: #38bdf8;
+  font-family: 'Consolas', 'Courier New', monospace;
+  font-size: 0.85rem;
+  max-height: 250px;
+  overflow-y: auto;
+}
+
+.status-indicator {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+  margin-right: 6px;
+}
+
+.status-indicator.online {
+  background-color: var(--midas-emerald);
+  box-shadow: 0 0 8px var(--midas-emerald);
+}
+
+.status-indicator.offline {
+  background-color: var(--midas-rose);
+  box-shadow: 0 0 8px var(--midas-rose);
+}
