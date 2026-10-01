@@ -2,6 +2,7 @@
  * ============================================================================
  * MIDAS BANK - CORE TREASURY ENGINE (C-LEVEL HIGH-VALUE TRANSFERS)
  * Padrão: Clean Architecture / 12-Factor Stateless Serverless Ready
+ * Hardened: Protegido contra Race Conditions, Host Poisoning & Cold Starts
  * ============================================================================
  */
 
@@ -16,12 +17,25 @@ const {
 } = require('@simplewebauthn/server');
 
 // ============================================================================
-// CONFIGURAÇÕES DE AMBIENTE & CRIPTOGRAFIA
+// CONFIGURAÇÕES DE AMBIENTE & CRIPTOGRAFIA DEFENSIVA
 // ============================================================================
 const PORT = process.env.PORT || 3000;
 const RP_NAME = 'Midas Bank - High Value Treasury';
 const CHALLENGE_TTL_MS = 120000; // 2 minutos de validade estrita
-const HMAC_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+
+// Correção 2: Segredo estático em dev e estritamente obrigatório em produção
+const HMAC_SECRET =
+  process.env.SESSION_SECRET ||
+  (process.env.NODE_ENV === 'production'
+    ? (() => {
+        throw new Error('CRITICAL FATAL: Variável SESSION_SECRET obrigatória em ambiente produtivo!');
+      })()
+    : 'midas_dev_insecure_static_secret_key_change_me_12345');
+
+// Correção 3: Allowlist de domínios confiáveis contra Host Header Poisoning
+const ALLOWED_RP_HOSTS = new Set(
+  ['localhost', '127.0.0.1', 'toque-de-midas.vercel.app', process.env.APP_DOMAIN].filter(Boolean)
+);
 
 // ============================================================================
 // DOMAIN ERRORS & TRATAMENTO DEFENSIVO
@@ -56,7 +70,6 @@ class WebAuthnSecurityError extends DomainError {
 
 // ============================================================================
 // SERVIÇO CRIPTOGRÁFICO DE DESAFIOS STATELESS (HMAC-SHA256)
-// Resolve a transição entre instâncias serverless (Vercel Lambdas) sem perda de estado.
 // ============================================================================
 class StatelessChallengeTokenService {
   static createToken(payload) {
@@ -106,7 +119,7 @@ class StatelessChallengeTokenService {
 }
 
 // ============================================================================
-// REPOSITÓRIO EM MEMÓRIA COM BLOQUEIO DE ESTADO (ISOLAMENTO DE NEGÓCIO)
+// REPOSITÓRIO EM MEMÓRIA COM BLOQUEIO DE ESTADO
 // ============================================================================
 const database = {
   director: {
@@ -186,13 +199,19 @@ function addStructuredAudit(event, details, level = 'INFO') {
 }
 
 // ============================================================================
-// RESOLUÇÃO DE ORIGEM & RP ID (COMPATIBILIDADE NUVEM / PROXIES / VERCEL)
+// RESOLUÇÃO DE ORIGEM & RP ID COM ALLOWLIST E VALIDAÇÃO ESTREITA
 // ============================================================================
 function extractRelyingPartyContext(req) {
   const forwardedHost = req.headers['x-forwarded-host'];
   const hostHeader = forwardedHost || req.headers.host || `localhost:${PORT}`;
+  const hostname = hostHeader.split(':')[0].toLowerCase();
+
+  // Correção 3: Validação contra allowlist em ambiente produtivo
+  if (!ALLOWED_RP_HOSTS.has(hostname) && process.env.NODE_ENV === 'production') {
+    throw new WebAuthnSecurityError(`RP ID inválido ou não autorizado: [${hostname}].`);
+  }
+
   const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
-  const hostname = hostHeader.split(':')[0]; // Remove porta para compor RP ID válido
   const origin = `${proto}://${hostHeader}`;
 
   return { rpID: hostname, origin };
@@ -264,8 +283,16 @@ app.get('/api/status', (req, res) => {
 app.post('/api/register/generate-options', async (req, res, next) => {
   try {
     const { username, displayName } = req.body;
-    if (username) database.director.username = String(username).trim();
-    if (displayName) database.director.displayName = String(displayName).trim();
+
+    // Correção 4: Sanitização estrita e proteção contra sobrescrita indevida do Diretor
+    if (username && typeof username === 'string' && username.includes('@')) {
+      if (username.endsWith('@midasbank.com')) {
+        database.director.username = username.trim().toLowerCase();
+      }
+    }
+    if (displayName && typeof displayName === 'string' && displayName.trim().length >= 3) {
+      database.director.displayName = displayName.trim();
+    }
 
     const { rpID } = extractRelyingPartyContext(req);
     const userIdBuffer = Buffer.from(database.director.id, 'utf-8');
@@ -387,6 +414,10 @@ app.post('/api/transfers/:id/generate-options', async (req, res, next) => {
       throw new TransactionConflictError(`A transferência [${id}] já foi liquidada e não permite nova assinatura.`);
     }
 
+    if (transfer.status === 'PROCESSANDO') {
+      throw new TransactionConflictError(`A transferência [${id}] já está em processamento de liquidação concorrente.`);
+    }
+
     if (database.director.credentials.length === 0) {
       throw new DomainError(
         'Nenhum dispositivo biométrico registrado. Vincule seu sensor de plataforma previamente.',
@@ -431,18 +462,25 @@ app.post('/api/transfers/:id/generate-options', async (req, res, next) => {
 });
 
 app.post('/api/transfers/:id/verify', async (req, res, next) => {
-  try {
-    const { id } = req.params;
-    const transfer = database.transfers.find((t) => t.id === id);
+  const { id } = req.params;
+  const transfer = database.transfers.find((t) => t.id === id);
 
+  try {
     if (!transfer) {
       throw new EntityNotFoundError('Transferência Bancária', id);
     }
 
-    // Lock de concorrência / Idempotência
+    // Correção 1: Checagem de Idempotência e Lock de Concorrência
     if (transfer.status === 'APROVADA') {
       throw new TransactionConflictError(`A transferência [${id}] já se encontra liquidada.`);
     }
+
+    if (transfer.status === 'PROCESSANDO') {
+      throw new TransactionConflictError(`A transferência [${id}] já está em processamento de liquidação concorrente.`);
+    }
+
+    // Trava atômica imediata antes de qualquer operação assíncrona
+    transfer.status = 'PROCESSANDO';
 
     const cookies = parseCookies(req);
     const sessionToken = cookies['midas_challenge'];
@@ -509,6 +547,10 @@ app.post('/api/transfers/:id/verify', async (req, res, next) => {
       transfer,
     });
   } catch (error) {
+    // Correção 1: Rollback garantido do lock caso a verificação falhe
+    if (transfer && transfer.status === 'PROCESSANDO') {
+      transfer.status = 'PENDENTE';
+    }
     next(error);
   }
 });
@@ -536,10 +578,16 @@ app.post('/api/director/clear-biometrics', (req, res) => {
 
 // ============================================================================
 // GLOBAL ERROR HANDLING MIDDLEWARE (DEFENSIVE & OBSERVABLE)
+// Preserva status HTTP de erros da borda (ex: 413 Payload Too Large)
 // ============================================================================
 app.use((err, req, res, next) => {
-  const statusCode = err instanceof DomainError ? err.statusCode : 500;
-  const errorCode = err instanceof DomainError ? err.errorCode : 'INTERNAL_SERVER_ERROR';
+  const statusCode = err.status || err.statusCode || (err instanceof DomainError ? err.statusCode : 500);
+  const errorCode =
+    err.type === 'entity.too.large'
+      ? 'PAYLOAD_TOO_LARGE'
+      : err instanceof DomainError
+      ? err.errorCode
+      : 'INTERNAL_SERVER_ERROR';
 
   console.error(`[CRITICAL_ERROR] [${errorCode}] ${err.message}`, {
     stack: process.env.NODE_ENV === 'development' ? err.stack : undefined,
