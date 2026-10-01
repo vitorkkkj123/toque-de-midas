@@ -1,3 +1,10 @@
+/**
+ * ============================================================================
+ * MIDAS BANK - CORE TREASURY ENGINE (C-LEVEL HIGH-VALUE TRANSFERS)
+ * Padrão: Clean Architecture / 12-Factor Stateless Serverless Ready
+ * ============================================================================
+ */
+
 const express = require('express');
 const path = require('path');
 const crypto = require('crypto');
@@ -8,316 +15,455 @@ const {
   verifyAuthenticationResponse,
 } = require('@simplewebauthn/server');
 
-const app = express();
+// ============================================================================
+// CONFIGURAÇÕES DE AMBIENTE & CRIPTOGRAFIA
+// ============================================================================
 const PORT = process.env.PORT || 3000;
-
-// Configuração de RP (Relying Party)
-// Em produção, rpID e expectedOrigin são baseados no domínio da aplicação
 const RP_NAME = 'Midas Bank - High Value Treasury';
+const CHALLENGE_TTL_MS = 120000; // 2 minutos de validade estrita
+const HMAC_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 
-// Função para obter rpID e expectedOrigin dinâmicos da requisição (compatível com localhost ou nuvem)
-function getRPDetails(req) {
-  const hostHeader = req.headers['x-forwarded-host'] || req.headers.host || `localhost:${PORT}`;
-  const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
-  const hostname = hostHeader.split(':')[0]; // sem a porta para o rpID
-  const origin = `${proto}://${hostHeader}`;
-  return { rpID: hostname, origin };
+// ============================================================================
+// DOMAIN ERRORS & TRATAMENTO DEFENSIVO
+// ============================================================================
+class DomainError extends Error {
+  constructor(message, statusCode = 400, errorCode = 'DOMAIN_ERROR') {
+    super(message);
+    this.name = this.constructor.name;
+    this.statusCode = statusCode;
+    this.errorCode = errorCode;
+    Error.captureStackTrace(this, this.constructor);
+  }
 }
 
-app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
+class EntityNotFoundError extends DomainError {
+  constructor(entityName, id) {
+    super(`${entityName} com identificador '${id}' não foi encontrado.`, 404, 'ENTITY_NOT_FOUND');
+  }
+}
 
-// Servir o bundle do SimpleWebAuthn Browser localmente para garantir funcionamento offline
-app.get('/vendor/simplewebauthn-browser.js', (req, res) => {
-  res.sendFile(
-    path.join(__dirname, 'node_modules', '@simplewebauthn', 'browser', 'dist', 'bundle', 'index.umd.min.js')
-  );
-});
+class TransactionConflictError extends DomainError {
+  constructor(message) {
+    super(message, 409, 'TRANSACTION_CONFLICT');
+  }
+}
 
-// ==========================================
-// BANCO DE DADOS EM MEMÓRIA (DEMONSTRAÇÃO)
-// ==========================================
-let currentDirector = {
-  id: 'usr_midas_cfo_001',
-  username: 'roberto.vianna@midasbank.com',
-  displayName: 'Roberto Vianna (CFO / Diretor Tesouraria)',
-  credentials: [],
-  currentChallenge: null,
+class WebAuthnSecurityError extends DomainError {
+  constructor(message) {
+    super(message, 401, 'WEBAUTHN_VERIFICATION_FAILED');
+  }
+}
+
+// ============================================================================
+// SERVIÇO CRIPTOGRÁFICO DE DESAFIOS STATELESS (HMAC-SHA256)
+// Resolve a transição entre instâncias serverless (Vercel Lambdas) sem perda de estado.
+// ============================================================================
+class StatelessChallengeTokenService {
+  static createToken(payload) {
+    const data = {
+      ...payload,
+      exp: Date.now() + CHALLENGE_TTL_MS,
+      nonce: crypto.randomBytes(16).toString('hex'),
+    };
+    const serialized = Buffer.from(JSON.stringify(data)).toString('base64url');
+    const signature = crypto
+      .createHmac('sha256', HMAC_SECRET)
+      .update(serialized)
+      .digest('base64url');
+
+    return `${serialized}.${signature}`;
+  }
+
+  static verifyAndExtract(token) {
+    if (!token || typeof token !== 'string' || !token.includes('.')) {
+      throw new WebAuthnSecurityError('Token de desafio ausente ou formato inválido.');
+    }
+
+    const [serialized, signature] = token.split('.');
+    const expectedSignature = crypto
+      .createHmac('sha256', HMAC_SECRET)
+      .update(serialized)
+      .digest('base64url');
+
+    const signatureBuffer = Buffer.from(signature, 'utf-8');
+    const expectedBuffer = Buffer.from(expectedSignature, 'utf-8');
+
+    if (
+      signatureBuffer.length !== expectedBuffer.length ||
+      !crypto.timingSafeEqual(signatureBuffer, expectedBuffer)
+    ) {
+      throw new WebAuthnSecurityError('Assinatura do desafio corrompida ou adulterada por atacante.');
+    }
+
+    const payload = JSON.parse(Buffer.from(serialized, 'base64url').toString('utf-8'));
+
+    if (Date.now() > payload.exp) {
+      throw new WebAuthnSecurityError('O tempo limite para autenticação biométrica expirou (TTL excedido).');
+    }
+
+    return payload;
+  }
+}
+
+// ============================================================================
+// REPOSITÓRIO EM MEMÓRIA COM BLOQUEIO DE ESTADO (ISOLAMENTO DE NEGÓCIO)
+// ============================================================================
+const database = {
+  director: {
+    id: 'usr_midas_cfo_001',
+    username: 'roberto.vianna@midasbank.com',
+    displayName: 'Roberto Vianna (CFO / Diretor Tesouraria)',
+    credentials: [],
+  },
+  transfers: [
+    {
+      id: 'TRX-9481',
+      beneficiary: 'AeroTech Logística Internacional S/A',
+      cnpj: '18.942.103/0001-55',
+      bank: '341 - Itaú Unibanco',
+      account: 'Ag. 0932 / CC 44820-1',
+      amount: 2450000.0,
+      purpose: 'Aquisição de Aeronave Corporativa (Contrato #884/2026)',
+      urgency: 'Alta',
+      createdAt: '2026-09-30 14:20:00',
+      status: 'PENDENTE',
+      approvedBy: null,
+      approvedAt: null,
+      credentialIdUsed: null,
+      cryptoProof: null,
+    },
+    {
+      id: 'TRX-9482',
+      beneficiary: 'Vortex Cloud Infrastructure Inc.',
+      cnpj: '45.120.984/0001-90',
+      bank: '033 - Santander',
+      account: 'Ag. 1500 / CC 99312-8',
+      amount: 1800000.0,
+      purpose: 'Expansão de Data Center Tier 4 (Capacidade IA)',
+      urgency: 'Média',
+      createdAt: '2026-09-30 15:45:00',
+      status: 'PENDENTE',
+      approvedBy: null,
+      approvedAt: null,
+      credentialIdUsed: null,
+      cryptoProof: null,
+    },
+    {
+      id: 'TRX-9483',
+      beneficiary: 'Quantum Partners Gestão de Recursos',
+      cnpj: '09.331.782/0001-12',
+      bank: '237 - Bradesco Prime',
+      account: 'Ag. 3400 / CC 12093-4',
+      amount: 5200000.0,
+      purpose: 'Aporte de Participação Societária (Operação M&A)',
+      urgency: 'Crítica',
+      createdAt: '2026-09-30 16:10:00',
+      status: 'PENDENTE',
+      approvedBy: null,
+      approvedAt: null,
+      credentialIdUsed: null,
+      cryptoProof: null,
+    },
+  ],
+  auditLogs: [
+    {
+      timestamp: new Date().toLocaleTimeString('pt-BR'),
+      event: 'ENGINE_INITIALIZED',
+      details: 'Motor WebAuthn FIDO2 carregado em modo zero-trust e stateless.',
+      level: 'INFO',
+    },
+  ],
 };
 
-let transfers = [
-  {
-    id: 'TRX-9481',
-    beneficiary: 'AeroTech Logística Internacional S/A',
-    cnpj: '18.942.103/0001-55',
-    bank: '341 - Itaú Unibanco',
-    account: 'Ag. 0932 / CC 44820-1',
-    amount: 2450000.00,
-    purpose: 'Aquisição de Aeronave Corporativa (Contrato #884/2026)',
-    urgency: 'Alta',
-    createdAt: '2026-09-30 14:20:00',
-    status: 'PENDENTE',
-    approvedBy: null,
-    approvedAt: null,
-    credentialIdUsed: null,
-    cryptoProof: null,
-  },
-  {
-    id: 'TRX-9482',
-    beneficiary: 'Vortex Cloud Infrastructure Inc.',
-    cnpj: '45.120.984/0001-90',
-    bank: '033 - Santander',
-    account: 'Ag. 1500 / CC 99312-8',
-    amount: 1800000.00,
-    purpose: 'Expansão de Data Center Tier 4 (Capacidade IA)',
-    urgency: 'Média',
-    createdAt: '2026-09-30 15:45:00',
-    status: 'PENDENTE',
-    approvedBy: null,
-    approvedAt: null,
-    credentialIdUsed: null,
-    cryptoProof: null,
-  },
-  {
-    id: 'TRX-9483',
-    beneficiary: 'Quantum Partners Gestão de Recursos',
-    cnpj: '09.331.782/0001-12',
-    bank: '237 - Bradesco Prime',
-    account: 'Ag. 3400 / CC 12093-4',
-    amount: 5200000.00,
-    purpose: 'Aporte de Participação Societária (Operação M&A)',
-    urgency: 'Crítica',
-    createdAt: '2026-09-30 16:10:00',
-    status: 'PENDENTE',
-    approvedBy: null,
-    approvedAt: null,
-    credentialIdUsed: null,
-    cryptoProof: null,
-  },
-];
-
-// Log de auditoria em memória
-let auditLogs = [
-  {
-    timestamp: new Date().toLocaleTimeString('pt-BR'),
-    event: 'SISTEMA INICIALIZADO',
-    details: 'Módulo WebAuthn FIDO2 carregado com suporte a biometria nativa.',
-    level: 'INFO',
-  }
-];
-
-function addAuditLog(event, details, level = 'INFO') {
-  auditLogs.unshift({
+function addStructuredAudit(event, details, level = 'INFO') {
+  database.auditLogs.unshift({
     timestamp: new Date().toLocaleTimeString('pt-BR'),
     event,
     details,
     level,
   });
-  if (auditLogs.length > 50) auditLogs.pop();
+  if (database.auditLogs.length > 100) database.auditLogs.pop();
 }
 
-// ==========================================
-// ROTAS DE STATUS E CONSULTA
-// ==========================================
+// ============================================================================
+// RESOLUÇÃO DE ORIGEM & RP ID (COMPATIBILIDADE NUVEM / PROXIES / VERCEL)
+// ============================================================================
+function extractRelyingPartyContext(req) {
+  const forwardedHost = req.headers['x-forwarded-host'];
+  const hostHeader = forwardedHost || req.headers.host || `localhost:${PORT}`;
+  const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
+  const hostname = hostHeader.split(':')[0]; // Remove porta para compor RP ID válido
+  const origin = `${proto}://${hostHeader}`;
 
+  return { rpID: hostname, origin };
+}
+
+// ============================================================================
+// APLICAÇÃO EXPRESS & MIDDLEWARES
+// ============================================================================
+const app = express();
+
+app.use(express.json({ limit: '100kb' }));
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Fallback estático do bundle WebAuthn Browser
+app.get('/vendor/simplewebauthn-browser.js', (req, res) => {
+  const bundlePath = path.join(
+    __dirname,
+    'node_modules',
+    '@simplewebauthn',
+    'browser',
+    'dist',
+    'bundle',
+    'index.umd.min.js'
+  );
+  res.sendFile(bundlePath);
+});
+
+// Helper de Cookies assinado
+function parseCookies(req) {
+  const list = {};
+  const cookieHeader = req.headers.cookie;
+  if (!cookieHeader) return list;
+
+  cookieHeader.split(';').forEach((cookie) => {
+    const parts = cookie.split('=');
+    list[parts.shift().trim()] = decodeURI(parts.join('='));
+  });
+  return list;
+}
+
+// ============================================================================
+// ROTAS DE STATUS & AUDITORIA
+// ============================================================================
 app.get('/api/status', (req, res) => {
-  res.json({
+  const { director, transfers, auditLogs } = database;
+  res.status(200).json({
     director: {
-      id: currentDirector.id,
-      username: currentDirector.username,
-      displayName: currentDirector.displayName,
-      hasPasskey: currentDirector.credentials.length > 0,
-      credentialCount: currentDirector.credentials.length,
-      credentials: currentDirector.credentials.map((c) => ({
-        id: c.id,
-        deviceType: c.deviceType || 'Plataforma (Biometria)',
-        createdAt: c.createdAt,
-        counter: c.counter,
-        publicKeyPreview: Buffer.from(c.publicKey).toString('hex').slice(0, 32) + '...',
+      id: director.id,
+      username: director.username,
+      displayName: director.displayName,
+      hasPasskey: director.credentials.length > 0,
+      credentialCount: director.credentials.length,
+      credentials: director.credentials.map((cred) => ({
+        id: cred.id,
+        deviceType: cred.deviceType,
+        createdAt: cred.createdAt,
+        counter: cred.counter,
+        publicKeyPreview: Buffer.from(cred.publicKey).toString('hex').slice(0, 32) + '...',
       })),
     },
     transfers,
-    auditLogs: auditLogs.slice(0, 10),
+    auditLogs: auditLogs.slice(0, 15),
   });
 });
 
-// ==========================================
-// 1. REGISTRO WEBAUTHN (VINCULAÇÃO BIOMÉTRICA)
-// ==========================================
-
-// Gera as opções de registro com desafio criptográfico
-app.post('/api/register/generate-options', async (req, res) => {
+// ============================================================================
+// 1. PIPELINE DE REGISTRO BIOMÉTRICO (WEBAUTHN REGISTRATION)
+// ============================================================================
+app.post('/api/register/generate-options', async (req, res, next) => {
   try {
     const { username, displayName } = req.body;
-    if (username) currentDirector.username = username;
-    if (displayName) currentDirector.displayName = displayName;
+    if (username) database.director.username = String(username).trim();
+    if (displayName) database.director.displayName = String(displayName).trim();
 
-    const { rpID } = getRPDetails(req);
-
-    // Converte ID do usuário em Uint8Array estável
-    const userIdBuffer = Buffer.from(currentDirector.id, 'utf-8');
+    const { rpID } = extractRelyingPartyContext(req);
+    const userIdBuffer = Buffer.from(database.director.id, 'utf-8');
 
     const options = await generateRegistrationOptions({
       rpName: RP_NAME,
       rpID,
       userID: new Uint8Array(userIdBuffer),
-      userName: currentDirector.username,
-      userDisplayName: currentDirector.displayName,
+      userName: database.director.username,
+      userDisplayName: database.director.displayName,
       attestationType: 'none',
-      excludeCredentials: currentDirector.credentials.map((cred) => ({
+      excludeCredentials: database.director.credentials.map((cred) => ({
         id: cred.id,
         transports: cred.transports,
       })),
       authenticatorSelection: {
-        // 'platform' força o uso de autenticadores integrados (Windows Hello, Touch ID, leitor biométrico)
-        authenticatorAttachment: 'platform',
+        authenticatorAttachment: 'platform', // Restringe a hardware seguro nativo
         residentKey: 'preferred',
-        userVerification: 'required', // Exige biometria/PIN
+        userVerification: 'required', // Impede bypass sem biometria/PIN
       },
     });
 
-    // Guarda o desafio temporário para validação posterior
-    currentDirector.currentChallenge = options.challenge;
+    // Criação do token stateless assinado via Cookie HttpOnly
+    const sessionToken = StatelessChallengeTokenService.createToken({
+      purpose: 'REGISTRATION',
+      challenge: options.challenge,
+      userId: database.director.id,
+    });
 
-    addAuditLog(
-      'CHALLENGE DE REGISTRO GERADO',
-      `Desafio gerado para ${currentDirector.username}. Solicitando validação de hardware local.`
+    const isSecure = req.headers['x-forwarded-proto'] === 'https' || req.secure;
+    res.setHeader(
+      'Set-Cookie',
+      `midas_challenge=${sessionToken}; Path=/; HttpOnly; SameSite=Strict; Max-Age=120${isSecure ? '; Secure' : ''}`
     );
 
-    res.json(options);
+    addStructuredAudit(
+      'REGISTRATION_CHALLENGE_ISSUED',
+      `Desafio criptográfico gerado para [${database.director.username}] no RP [${rpID}].`,
+      'INFO'
+    );
+
+    res.status(200).json(options);
   } catch (error) {
-    console.error('Erro em generate-registration-options:', error);
-    res.status(500).json({ error: error.message });
+    next(error);
   }
 });
 
-// Verifica a resposta de registro enviada pelo navegador após a leitura biométrica
-app.post('/api/register/verify', async (req, res) => {
+app.post('/api/register/verify', async (req, res, next) => {
   try {
-    const body = req.body;
-    const { rpID, origin } = getRPDetails(req);
+    const responsePayload = req.body;
+    const cookies = parseCookies(req);
+    const sessionToken = cookies['midas_challenge'];
+
+    const sessionData = StatelessChallengeTokenService.verifyAndExtract(sessionToken);
+
+    if (sessionData.purpose !== 'REGISTRATION') {
+      throw new WebAuthnSecurityError('Finalidade do token de desafio incompatível com registro.');
+    }
+
+    const { rpID, origin } = extractRelyingPartyContext(req);
 
     const verification = await verifyRegistrationResponse({
-      response: body,
-      expectedChallenge: currentDirector.currentChallenge,
+      response: responsePayload,
+      expectedChallenge: sessionData.challenge,
       expectedOrigin: origin,
       expectedRPID: rpID,
       requireUserVerification: true,
     });
 
-    const { verified, registrationInfo } = verification;
-
-    if (verified && registrationInfo) {
-      const { credential, credentialDeviceType } = registrationInfo;
-
-      // Armazena a credencial (Chave Pública + ID). A chave privada NUNCA sai do hardware.
-      const newCred = {
-        id: credential.id,
-        publicKey: credential.publicKey, // Uint8Array
-        counter: credential.counter,
-        transports: credential.transports || ['internal'],
-        deviceType: credentialDeviceType || 'platform',
-        createdAt: new Date().toLocaleString('pt-BR'),
-      };
-
-      // Substitui ou adiciona credencial
-      currentDirector.credentials = [newCred];
-      currentDirector.currentChallenge = null;
-
-      addAuditLog(
-        'BIOMETRIA VINCULADA COM SUCESSO',
-        `Dispositivo registrado para ${currentDirector.displayName}. Chave pública registrada no cofre do banco.`,
-        'SUCCESS'
-      );
-
-      res.json({
-        verified: true,
-        message: 'Dispositivo biométrico vinculado com sucesso à conta da diretoria!',
-        credentialId: credential.id,
-      });
-    } else {
-      res.status(400).json({ verified: false, error: 'Falha na validação criptográfica do registro.' });
+    if (!verification.verified || !verification.registrationInfo) {
+      throw new WebAuthnSecurityError('Validação criptográfica da credencial de plataforma falhou.');
     }
+
+    const { credential, credentialDeviceType } = verification.registrationInfo;
+
+    const newCredentialRecord = {
+      id: credential.id,
+      publicKey: credential.publicKey,
+      counter: credential.counter,
+      transports: credential.transports || ['internal'],
+      deviceType: credentialDeviceType || 'platform',
+      createdAt: new Date().toLocaleString('pt-BR'),
+    };
+
+    database.director.credentials = [newCredentialRecord];
+
+    // Limpa o cookie de desafio pós-consumo (Anti-Replay)
+    res.setHeader('Set-Cookie', 'midas_challenge=; Path=/; HttpOnly; Max-Age=0');
+
+    addStructuredAudit(
+      'DEVICE_PROVISIONED_SUCCESS',
+      `Credencial biométrica FIDO2 atrelada ao diretor [${database.director.displayName}].`,
+      'SUCCESS'
+    );
+
+    res.status(200).json({
+      verified: true,
+      message: 'Dispositivo biométrico registrado com integridade criptográfica verificada.',
+      credentialId: credential.id,
+    });
   } catch (error) {
-    console.error('Erro em verify-registration:', error);
-    addAuditLog('FALHA NO REGISTRO BIOMÉTRICO', error.message, 'ERROR');
-    res.status(400).json({ verified: false, error: error.message });
+    next(error);
   }
 });
 
-// ==========================================
-// 2. AUTORIZAÇÃO WEBAUTHN (APROVAÇÃO DE TRANSFERÊNCIA)
-// ==========================================
-
-// Gera desafio de autenticação vinculado a uma transferência específica
-app.post('/api/transfers/:id/generate-options', async (req, res) => {
+// ============================================================================
+// 2. PIPELINE DE AUTORIZAÇÃO BIOMÉTRICA (TRANSFERÊNCIA > R$ 1 MILHÃO)
+// ============================================================================
+app.post('/api/transfers/:id/generate-options', async (req, res, next) => {
   try {
-    const transferId = req.params.id;
-    const transfer = transfers.find((t) => t.id === transferId);
+    const { id } = req.params;
+    const transfer = database.transfers.find((t) => t.id === id);
 
     if (!transfer) {
-      return res.status(404).json({ error: 'Transferência não encontrada.' });
+      throw new EntityNotFoundError('Transferência Bancária', id);
     }
 
     if (transfer.status === 'APROVADA') {
-      return res.status(400).json({ error: 'Esta transferência já foi aprovada e liquidada.' });
+      throw new TransactionConflictError(`A transferência [${id}] já foi liquidada e não permite nova assinatura.`);
     }
 
-    if (currentDirector.credentials.length === 0) {
-      return res.status(400).json({
-        error: 'Nenhum dispositivo biométrico cadastrado. Faça a vinculação do Windows Hello / Touch ID primeiro.',
-      });
+    if (database.director.credentials.length === 0) {
+      throw new DomainError(
+        'Nenhum dispositivo biométrico registrado. Vincule seu sensor de plataforma previamente.',
+        400,
+        'NO_BIOMETRICS_PROVISIONED'
+      );
     }
 
-    const { rpID } = getRPDetails(req);
+    const { rpID } = extractRelyingPartyContext(req);
 
     const options = await generateAuthenticationOptions({
       rpID,
-      allowCredentials: currentDirector.credentials.map((cred) => ({
+      allowCredentials: database.director.credentials.map((cred) => ({
         id: cred.id,
         transports: cred.transports,
       })),
-      userVerification: 'required', // Força validação biométrica nativa
+      userVerification: 'required',
     });
 
-    currentDirector.currentChallenge = options.challenge;
-    currentDirector.pendingTransferId = transferId;
+    const sessionToken = StatelessChallengeTokenService.createToken({
+      purpose: 'AUTHORIZATION',
+      challenge: options.challenge,
+      transferId: id,
+    });
 
-    addAuditLog(
-      'ORDEM DE APROVAÇÃO INICIADA',
-      `Solicitada biometria para autorizar R$ ${transfer.amount.toLocaleString('pt-BR', { minimumFractionDigits: 2 })} (${transfer.id})`
+    const isSecure = req.headers['x-forwarded-proto'] === 'https' || req.secure;
+    res.setHeader(
+      'Set-Cookie',
+      `midas_challenge=${sessionToken}; Path=/; HttpOnly; SameSite=Strict; Max-Age=120${isSecure ? '; Secure' : ''}`
     );
 
-    res.json(options);
+    addStructuredAudit(
+      'TRANSFER_APPROVAL_INTENT',
+      `Desafio emitido para autorização de R$ ${transfer.amount.toLocaleString('pt-BR', { minimumFractionDigits: 2 })} na transferência [${id}].`,
+      'INFO'
+    );
+
+    res.status(200).json(options);
   } catch (error) {
-    console.error('Erro em generate-authentication-options:', error);
-    res.status(500).json({ error: error.message });
+    next(error);
   }
 });
 
-// Valida a assinatura digital gerada pelo hardware local após o toque biométrico
-app.post('/api/transfers/:id/verify', async (req, res) => {
+app.post('/api/transfers/:id/verify', async (req, res, next) => {
   try {
-    const transferId = req.params.id;
-    const transfer = transfers.find((t) => t.id === transferId);
+    const { id } = req.params;
+    const transfer = database.transfers.find((t) => t.id === id);
 
     if (!transfer) {
-      return res.status(404).json({ error: 'Transferência não encontrada.' });
+      throw new EntityNotFoundError('Transferência Bancária', id);
     }
 
-    const body = req.body;
-    const { rpID, origin } = getRPDetails(req);
+    // Lock de concorrência / Idempotência
+    if (transfer.status === 'APROVADA') {
+      throw new TransactionConflictError(`A transferência [${id}] já se encontra liquidada.`);
+    }
 
-    // Encontra a credencial correspondente
-    const userCredential = currentDirector.credentials.find((c) => c.id === body.id);
+    const cookies = parseCookies(req);
+    const sessionToken = cookies['midas_challenge'];
+    const sessionData = StatelessChallengeTokenService.verifyAndExtract(sessionToken);
+
+    if (sessionData.purpose !== 'AUTHORIZATION' || sessionData.transferId !== id) {
+      throw new WebAuthnSecurityError('Violação de contexto: o desafio submetido não pertence a esta transferência.');
+    }
+
+    const responsePayload = req.body;
+    const userCredential = database.director.credentials.find((c) => c.id === responsePayload.id);
 
     if (!userCredential) {
-      return res.status(400).json({ error: 'Credencial biométrica não reconhecida para este diretor.' });
+      throw new WebAuthnSecurityError('A credencial biométrica utilizada não pertence a este executivo.');
     }
 
+    const { rpID, origin } = extractRelyingPartyContext(req);
+
     const verification = await verifyAuthenticationResponse({
-      response: body,
-      expectedChallenge: currentDirector.currentChallenge,
+      response: responsePayload,
+      expectedChallenge: sessionData.challenge,
       expectedOrigin: origin,
       expectedRPID: rpID,
       credential: {
@@ -329,71 +475,98 @@ app.post('/api/transfers/:id/verify', async (req, res) => {
       requireUserVerification: true,
     });
 
-    const { verified, authenticationInfo } = verification;
-
-    if (verified && authenticationInfo) {
-      // Atualiza o contador de uso para mitigar ataques de replay
-      userCredential.counter = authenticationInfo.newCounter;
-      currentDirector.currentChallenge = null;
-      currentDirector.pendingTransferId = null;
-
-      // Atualiza a transferência para APROVADA
-      const cryptoProof = crypto
-        .createHash('sha256')
-        .update(`${transfer.id}-${transfer.amount}-${userCredential.id}-${Date.now()}`)
-        .digest('hex');
-
-      transfer.status = 'APROVADA';
-      transfer.approvedBy = currentDirector.displayName;
-      transfer.approvedAt = new Date().toLocaleString('pt-BR');
-      transfer.credentialIdUsed = userCredential.id;
-      transfer.cryptoProof = cryptoProof;
-
-      addAuditLog(
-        'TRANSFERÊNCIA LIQUIDADA COM TOQUE DE MIDAS',
-        `Aprovados R$ ${transfer.amount.toLocaleString('pt-BR', { minimumFractionDigits: 2 })} por ${currentDirector.displayName} via Biometria Nativa. Prova: ${cryptoProof.slice(0, 16)}...`,
-        'SUCCESS'
-      );
-
-      res.json({
-        verified: true,
-        message: 'Transferência aprovada com sucesso via biometria física!',
-        transfer,
-      });
-    } else {
-      res.status(400).json({ verified: false, error: 'Assinatura biométrica inválida.' });
+    if (!verification.verified || !verification.authenticationInfo) {
+      throw new WebAuthnSecurityError('Assinatura biométrica ilegítima ou rejeitada pelo hardware de segurança.');
     }
+
+    // Atualização de contador contra ataques de clonagem/replay
+    userCredential.counter = verification.authenticationInfo.newCounter;
+
+    // Mutação de estado atômica com geração de recibo criptográfico
+    const proofHash = crypto
+      .createHash('sha256')
+      .update(`${transfer.id}|${transfer.amount}|${userCredential.id}|${Date.now()}`)
+      .digest('hex');
+
+    transfer.status = 'APROVADA';
+    transfer.approvedBy = database.director.displayName;
+    transfer.approvedAt = new Date().toLocaleString('pt-BR');
+    transfer.credentialIdUsed = userCredential.id;
+    transfer.cryptoProof = `0x${proofHash}`;
+
+    // Descarte do desafio
+    res.setHeader('Set-Cookie', 'midas_challenge=; Path=/; HttpOnly; Max-Age=0');
+
+    addStructuredAudit(
+      'TRANSFER_SETTLED_FIDO2',
+      `Transação [${transfer.id}] de R$ ${transfer.amount.toLocaleString('pt-BR', { minimumFractionDigits: 2 })} liquidada com assinatura biométrica. Hash: ${transfer.cryptoProof.slice(0, 18)}...`,
+      'SUCCESS'
+    );
+
+    res.status(200).json({
+      verified: true,
+      message: 'Ordem de transferência executada e liquidada com validação biométrica em hardware.',
+      transfer,
+    });
   } catch (error) {
-    console.error('Erro em verify-authentication:', error);
-    addAuditLog('FALHA NA ASSINATURA BIOMÉTRICA', error.message, 'ERROR');
-    res.status(400).json({ verified: false, error: error.message });
+    next(error);
   }
 });
 
-// Rota auxiliar para resetar a simulação
+// ============================================================================
+// UTILITÁRIOS DE DEMONSTRAÇÃO
+// ============================================================================
 app.post('/api/reset', (req, res) => {
-  transfers.forEach((t) => {
+  database.transfers.forEach((t) => {
     t.status = 'PENDENTE';
     t.approvedBy = null;
     t.approvedAt = null;
     t.credentialIdUsed = null;
     t.cryptoProof = null;
   });
-  addAuditLog('RESET DE SIMULAÇÃO', 'Todas as transferências voltaram ao estado pendente.', 'WARNING');
-  res.json({ success: true, message: 'Transferências resetadas para o estado pendente.' });
+  addStructuredAudit('SIMULATION_RESET', 'Transferências resetadas para validação de testes.', 'WARNING');
+  res.status(200).json({ success: true, message: 'Transferências retornadas ao status pendente.' });
 });
 
-// Desvincular credencial
 app.post('/api/director/clear-biometrics', (req, res) => {
-  currentDirector.credentials = [];
-  addAuditLog('BIOMETRIA DESVINCULADA', 'Credenciais biométricas do diretor foram removidas.', 'WARNING');
-  res.json({ success: true, message: 'Biometria desvinculada com sucesso.' });
+  database.director.credentials = [];
+  addStructuredAudit('CREDENTIAL_PURGE', 'Credenciais biométricas do diretor foram revogadas.', 'WARNING');
+  res.status(200).json({ success: true, message: 'Dispositivo biométrico desvinculado com sucesso.' });
 });
 
-app.listen(PORT, () => {
-  console.log(`=======================================================`);
-  console.log(`🏛️  MIDAS BANK - PORTAL DE APROVAÇÃO BIOMÉTRICA (C-LEVEL)`);
-  console.log(`🔗  Servidor rodando em: http://localhost:${PORT}`);
-  console.log(`🛡️  WebAuthn / FIDO2 pronto para Windows Hello / Touch ID`);
-  console.log(`=======================================================`);
+// ============================================================================
+// GLOBAL ERROR HANDLING MIDDLEWARE (DEFENSIVE & OBSERVABLE)
+// ============================================================================
+app.use((err, req, res, next) => {
+  const statusCode = err instanceof DomainError ? err.statusCode : 500;
+  const errorCode = err instanceof DomainError ? err.errorCode : 'INTERNAL_SERVER_ERROR';
+
+  console.error(`[CRITICAL_ERROR] [${errorCode}] ${err.message}`, {
+    stack: process.env.NODE_ENV === 'development' ? err.stack : undefined,
+    path: req.path,
+    method: req.method,
+  });
+
+  addStructuredAudit(`EXCEPTION_${errorCode}`, err.message, 'ERROR');
+
+  res.status(statusCode).json({
+    error: err.message || 'Ocorreu um erro interno de processamento.',
+    code: errorCode,
+    timestamp: new Date().toISOString(),
+  });
 });
+
+// ============================================================================
+// INICIALIZAÇÃO CONDICIONAL (COMPATIBILIDADE VERCEL SERVERLESS / LOCAL STANDALONE)
+// ============================================================================
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`=======================================================`);
+    console.log(`🏛️  MIDAS BANK - PORTAL DE APROVAÇÃO BIOMÉTRICA (C-LEVEL)`);
+    console.log(`🔗  Servidor rodando em: http://localhost:${PORT}`);
+    console.log(`🛡️  WebAuthn / FIDO2 pronto para Windows Hello / Touch ID`);
+    console.log(`=======================================================`);
+  });
+}
+
+module.exports = app;
